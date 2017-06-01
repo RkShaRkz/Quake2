@@ -8,11 +8,9 @@
 #define ARRAY_ARG(array)	array, sizeof(array)/sizeof(array[0])
 #define ARRAY_COUNT(array)	(sizeof(array)/sizeof(array[0]))
 
-#define TEX_WIDTH		256
-#define TEX_HEIGHT		256
+#define TEX_HEIGHT		1024
 
 //#define DEBUG_CPP		1
-#define CPP_4BPP		1
 
 void Error(char *fmt, ...)
 {
@@ -27,18 +25,13 @@ void Error(char *fmt, ...)
 }
 
 
-#define assert(x)	if (!(x)) { Error("Assertsion failed: %s (%s, %d)\n", #x, __FILE__, __LINE__); }
-
-template <class T> void ZeroMem(T &obj)
-{
-	memset(&obj, 0, sizeof(T));
-}
+#define assert(x)	if (!(x)) { Error("Assertion failed: %s (%s, %d)\n", #x, __FILE__, __LINE__); }
 
 
 struct letterloc_t
 {
-	float pos[2];
-	float size[2];
+	int			pos[2];
+	int			size[2];
 };
 
 struct fontDef_t
@@ -64,11 +57,15 @@ private:
 	bool		isItalic;
 	bool		isUnderline;
 	bool		isStrike;
+	bool		isAntialiased;
+	bool		variadic;			//!! find a better name
 
 	// output params
 	bool		compressTga;
 	bool 		monochrome;
 	bool		cppFormat;
+	bool		packedCpp;
+	bool		useNamespace;
 
 	// vars
 	HFONT		hf;
@@ -76,7 +73,29 @@ private:
 	HBITMAP		dib, oldbitmap;
 	unsigned char *bmbits;
 	fontDef_t	font_def;
+	int			texture_width;
 	int			texture_height;
+
+	// Saved program arguments
+	int			_argc;
+	const char** _argv;
+	const char* ARG(int index)
+	{
+		return (index >= _argc) ? "" : _argv[index];
+	}
+	void PrintArgs(FILE* f)
+	{
+		fprintf(f, "// FontGen");
+		for (int i = 1; i < _argc; i++)
+		{
+			const char* arg = _argv[i];
+			if (strchr(arg, ' '))
+				fprintf(f, " \"%s\"", arg);
+			else
+				fprintf(f, " %s", arg);
+		}
+		fprintf(f, "\n");
+	}
 
 	// Functions
 	void PrepareFont();
@@ -88,21 +107,12 @@ private:
 	void SaveCpp();
 
 public:
-	FontGen(int argc, char *argv[]);
+	FontGen(int argc, const char** argv);
 	virtual ~FontGen();
+	static void Usage();
 	void Go();
 };
 
-
-static const char *GetArg(int which, int argc, char **argv)
-{
-	if ( which >= argc )
-		return "";
-	else
-		return argv[which];
-}
-
-#define ARG(X) GetArg ( X, argc, argv )
 
 static void MemSwap(void *a0, void *b0, int count)
 {
@@ -117,7 +127,7 @@ static void MemSwap(void *a0, void *b0, int count)
 }
 
 
-FontGen::FontGen(int argc, char **argv)
+FontGen::FontGen(int argc, const char **argv)
 :	hf(NULL)
 ,	dc(NULL)
 ,	dib(NULL)
@@ -130,21 +140,31 @@ FontGen::FontGen(int argc, char **argv)
 ,	isUnderline(false)
 ,	isItalic(false)
 ,	isStrike(false)
+,	isAntialiased(false)
+,	variadic(false)
 ,	compressTga(false)
 ,	monochrome(false)
 ,	cppFormat(false)
+,	packedCpp(false)
+,	useNamespace(false)
 {
-	int arg;
-
 	fontName[0] = 0;
 	fontWinName[0] = 0;
+	texture_width = 256;
 
-	for (arg = 1; arg < argc; arg++) {
-		if (!stricmp(ARG(arg), "-size")) {
-			fontSize = atoi(ARG(++arg));
+	_argc = argc;
+	_argv = argv;
+
+	for (int argIdx = 1; argIdx < argc; argIdx++)
+	{
+		const char* arg = argv[argIdx];
+		if (!stricmp(arg, "-size"))
+		{
+			fontSize = atoi(ARG(++argIdx));
 		}
-		else if (!stricmp(ARG(arg), "-styles")) {
-			const char *styles = ARG(++arg);
+		else if (!stricmp(arg, "-styles"))
+		{
+			const char *styles = ARG(++argIdx);
 
 			fontStyle = 0;
 			if (strstr(styles, "bold"))
@@ -155,45 +175,102 @@ FontGen::FontGen(int argc, char **argv)
 				isUnderline = true;
 			if (strstr(styles, "strikeout"))
 				isStrike = true;
+			if (strstr(styles, "antialias"))
+				isAntialiased = true;
 		}
-		else if (!stricmp(ARG(arg), "-first")) {
-			firstChar = atoi(ARG(++arg));
+		else if (!stricmp(arg, "-first"))
+		{
+			firstChar = atoi(ARG(++argIdx));
 		}
-		else if (!stricmp(ARG(arg), "-last")) {
-			lastChar = atoi(ARG(++arg));
+		else if (!stricmp(arg, "-last"))
+		{
+			lastChar = atoi(ARG(++argIdx));
 		}
-		else if (!stricmp(ARG(arg), "-winname")) {
-			strcpy(fontWinName, ARG(++arg));
+		else if (!stricmp(arg, "-winname"))
+		{
+			strcpy(fontWinName, ARG(++argIdx));
 		}
-		else if (!stricmp(ARG(arg), "-name")) {
-			strcpy(fontName, ARG(++arg));
+		else if (!stricmp(arg, "-name"))
+		{
+			strcpy(fontName, ARG(++argIdx));
 		}
-		else if (!stricmp(ARG(arg), "-tga")) {
-			const char *parms = ARG(++arg);
+		else if (!stricmp(arg, "-variadic"))
+		{
+			variadic = true;
+		}
+		else if (!stricmp(arg, "-texwidth"))
+		{
+			texture_width = atoi(ARG(++argIdx));
+		}
+		else if (!stricmp(arg, "-tga"))
+		{
+			const char *parms = ARG(++argIdx);
 			if (strstr(parms, "packed"))
 				compressTga = true;
-			if (strstr(parms, "8bit")) {
+			if (strstr(parms, "8bit"))
 				monochrome = true;
-			}
 		}
-		else if (!stricmp(ARG(arg), "-cpp")) {
+		else if (!stricmp(arg, "-cpp"))
+		{
 			cppFormat = true;
+			const char *parms = ARG(argIdx+1);
+			if (parms[0] != '-' && parms[0] != 0)	// check if we have -cpp flags
+			{
+				argIdx++;
+				if (strstr(parms, "packed"))
+					packedCpp = true;
+				if (strstr(parms, "namespace"))
+					useNamespace = true;
+			}
 		}
 	}
 
 	// Check validity...
-	if ( firstChar >= lastChar ) {
-		Error( "ERROR: First char (%d) is >= last char (%d)\n", firstChar, lastChar );
+	if (firstChar >= lastChar)
+	{
+		Error("ERROR: First char (%d) is >= last char (%d)\n", firstChar, lastChar);
 	}
-	if ( fontSize <= 0 ) {
-		Error( "ERROR: Font size (%d) is <= 0\n", fontSize );
+	if (fontSize <= 0)
+	{
+		Error("ERROR: Font size (%d) is <= 0\n", fontSize);
 	}
-	if ( !fontName[0] ) {
-		Error( "ERROR: No font name specified (do it with -name)\n" );
+	if (!fontName[0])
+	{
+		Error("ERROR: No font name specified (do it with -name)\n");
 	}
-	if ( !fontWinName[0] ) {
-		Error( "ERROR: No windows font name specified (do it with -winname)\n" );
+	if (!fontWinName[0])
+	{
+		Error("ERROR: No windows font name specified (do it with -winname)\n");
 	}
+	if (variadic && !cppFormat)
+	{
+		printf("WARNING: variadic fonts are supported only with -cpp option\n");
+	}
+}
+
+void FontGen::Usage()
+{
+	printf(
+		"Usage: fontgen -name <name> -winname \"<name>\" [options]\n"
+		"  Required:\n"
+		"    -name <name>        - The font name that the game will use\n"
+		"    -winname \"<name>\" - The Windows name of the font (in quotes)\n"
+		"  Optional:\n"
+		"    -size <number>      - The size of the font in pixels (default 16)\n"
+		"    -first <number>     - First character number to use. (default 32 (spacebar) )\n"
+		"    -last <number>      - Last character number to use (default 126)\n"
+		"    -styles <string>    - Styles to apply. <string> is comma separated list of:\n"
+		"                          bold, underline, strikeout, italic, antialias\n"
+		"                          Example: For a bold underlined string, use\n"
+		"                          \"-styles bold,underline\" (No spaces between commas)\n"
+		"    -variadic           - allow variable-width fonts\n"
+		"    -texwidth <number>  - width of target texture, default is 256\n"
+		"    -tga <type>         - TGA output format, comma separated list of:\n"
+		"                          8 (8-bit texture), 24, 32, packed\n"
+		"    -cpp [type]         - write as C header file instead of binaries\n"
+		"                          <type>: \"packed\" = 4bpp + RLE-compressed\n"
+		"                          namespace = put data into <name> namespace\n"
+	);
 }
 
 FontGen::~FontGen()
@@ -223,7 +300,7 @@ void FontGen::PrepareFont()
 		DEFAULT_CHARSET,
 		OUT_DEFAULT_PRECIS,//OUT_TT_PRECIS,
 		CLIP_DEFAULT_PRECIS,
-		PROOF_QUALITY,
+		isAntialiased ? PROOF_QUALITY : NONANTIALIASED_QUALITY,
 		DEFAULT_PITCH | FF_DONTCARE,
 		fontWinName
 	);
@@ -236,9 +313,9 @@ void FontGen::PrepareBitmap()
 	BITMAPINFO bmi;
 	BITMAPINFOHEADER &head = bmi.bmiHeader;
 
-	ZeroMem(bmi);
+	memset(&bmi, 0, sizeof(bmi));
 	head.biSize        = sizeof(BITMAPINFOHEADER);
-	head.biWidth       = TEX_WIDTH;
+	head.biWidth       = texture_width;
 	head.biHeight      = TEX_HEIGHT;
 	head.biPlanes      = 1;
 	head.biBitCount    = 24;
@@ -256,17 +333,21 @@ void FontGen::PrepareBitmap()
 	SelectObject(dc, hf);
 
 	SIZE theSize;
-	GetTextExtentPoint32( dc, " ", 1, &theSize);
-	fontSize = theSize.cy;
+	GetTextExtentPoint32( dc, "W", 1, &theSize);
+	if (fontSize != theSize.cy)
+	{
+		fontSize = theSize.cy;
+		printf("Overriding font size to %d\n", fontSize);
+	}
 
-	memset(bmbits, 0, TEX_WIDTH * TEX_HEIGHT * 3);
+	memset(bmbits, 0, texture_width * TEX_HEIGHT * 3);
 }
 
 void FontGen::PrepareHeader()
 {
 	int i;
 
-	ZeroMem(font_def);
+	memset(&font_def, 0, sizeof(font_def));
 	for (i = 0; i < 256; i++)
 		font_def.indirection[i] = -1;
 	for (i = firstChar; i <= lastChar; i++)
@@ -282,6 +363,7 @@ void FontGen::DrawFont()
 	int currentColumn = 0;
 	int maxHeight = 0;
 	int numChars = lastChar - firstChar + 1;
+	bool fixedFont = true;
 
 	for (int i = 0; i < numChars; i++)
 	{
@@ -292,15 +374,17 @@ void FontGen::DrawFont()
 		s[0] = i + firstChar;
 		s[1] = 0;
 
-		if ( !GetTextExtentPoint32 ( dc, s, 1, &size ) ) {
-			Error( "ERROR: Couldn't draw character #%d (%c) - Bye!\n", (int) s[0], s[0] );
+		if (!GetTextExtentPoint32(dc, s, 1, &size))
+		{
+			Error("ERROR: Couldn't draw character #%d (%c) - Bye!\n", (int) s[0], s[0]);
 		}
 
 		// These below are padded for bilinear filtering
 		size.cx += 1;
 		size.cy += 1;
 
-		if ( currentColumn + size.cx > TEX_WIDTH ) {
+		if (currentColumn + size.cx > texture_width)
+		{
 			currentColumn = 0;
 			currentLine += maxHeight;
 			maxHeight = 0;
@@ -308,25 +392,26 @@ void FontGen::DrawFont()
 			continue;
 		}
 
-		if ( currentLine + size.cy > TEX_HEIGHT ) {
+		if (currentLine + size.cy > TEX_HEIGHT)
+		{
 			// FIXME allow multiple textures
-			Error("ERROR: Font size exceeds %dx%d texture size.\n", TEX_WIDTH, TEX_HEIGHT);
+			Error("ERROR: Font size exceeds %dx%d texture size.\n", texture_width, TEX_HEIGHT);
 		}
 
-		maxHeight = max ( maxHeight, size.cy );
+		maxHeight = max(maxHeight, size.cy);
 
 		fmtRect.left   = currentColumn;
 		fmtRect.top    = currentLine;
 		fmtRect.right  = fmtRect.left + size.cx - 1;
 		fmtRect.bottom = fmtRect.top + size.cy - 1;
 
-		if ( !DrawText ( dc, s, 1, &fmtRect, DT_LEFT | DT_NOPREFIX | DT_TOP ) )
-			printf ( "ERROR: Drawtext failed on char #%d (%c) - Bye!\n", (int) s[0], s[0] );
+		if (!DrawText(dc, s, 1, &fmtRect, DT_LEFT | DT_NOPREFIX | DT_TOP))
+			Error("ERROR: DrawText failed on char #%d (%c) - Bye!\n", (int) s[0], s[0]);
 
-		font_def.locations[i].pos[0]  = (float) currentColumn;
-		font_def.locations[i].pos[1]  = (float) currentLine;
-		font_def.locations[i].size[0] = (float) size.cx-1;
-		font_def.locations[i].size[1] = (float) size.cy-1;
+		font_def.locations[i].pos[0]  = currentColumn;
+		font_def.locations[i].pos[1]  = currentLine;
+		font_def.locations[i].size[0] = size.cx-1;
+		font_def.locations[i].size[1] = size.cy-1;
 		if (!i)
 		{
 			font_def.charWidth  = size.cx;
@@ -335,10 +420,21 @@ void FontGen::DrawFont()
 		else
 		{
 			if (size.cx != font_def.charWidth || size.cy != font_def.charHeight)
-				Error("Non-monospace font!");
+			{
+				if (!variadic)
+					Error("Non-monospace font! Use -variadic if you want to use it\n");
+				font_def.charWidth = max(size.cx, font_def.charWidth);
+				font_def.charHeight = max(size.cx, font_def.charHeight);
+				fixedFont = false;
+			}
 		}
 
 		currentColumn += size.cx;
+	}
+
+	if (fixedFont && variadic)
+	{
+		printf("WARNING: monospace font was used with -variadic\n");
 	}
 
 	// This sees if it can eliminate things
@@ -355,7 +451,7 @@ void FontGen::DrawFont()
 	}
 
 	// I don't know how necessary this is, but it can't hurt.
-	GdiFlush ();
+	GdiFlush();
 }
 
 
@@ -366,7 +462,7 @@ void FontGen::DrawFont()
 #define TGA_TOPRIGHT		0x30					// unused
 
 #if _MSC_VER
-#pragma pack(push,1)
+#pragma pack(push, 1)
 #endif
 
 struct tgaHdr_t
@@ -387,12 +483,9 @@ bool WriteTGA(const char *name, byte *pic, int width, int height, bool canCompre
 {
 	int		i;
 
-	FILE *f;
-	if (!(f = fopen(name, "wb")))
-	{
-		printf("WriteTGA(%s): cannot create file\n", name);
-		return false;
-	}
+	FILE *f = fopen(name, "wb");
+	if (!f)
+		Error("WriteTGA(%s): cannot create file\n", name);
 
 	byte *src;
 	int size = width * height;
@@ -547,7 +640,7 @@ void FontGen::SaveTarga()
 	sprintf(fileName, "%s.tga", font_def.name);
 
 	int start_line = TEX_HEIGHT - texture_height;
-	WriteTGA(fileName, bmbits + TEX_WIDTH * 3 * start_line, TEX_WIDTH, texture_height, compressTga, monochrome);
+	WriteTGA(fileName, bmbits + texture_width * 3 * start_line, texture_width, texture_height, compressTga, monochrome);
 }
 
 
@@ -579,7 +672,7 @@ void FontGen::SaveFontdef()
 	fprintf( f, "locations {\n" );
 	for ( i=0; i < 256; i++ )
 	{
-		fprintf( f, "{ %g %g %g %g } ", font_def.locations[i].pos[0], font_def.locations[i].pos[1],
+		fprintf( f, "{ %d %d %d %d } ", font_def.locations[i].pos[0], font_def.locations[i].pos[1],
 			font_def.locations[i].size[0], font_def.locations[i].size[1] );
 		if ( ( i + 1 ) % 3 == 0 )
 			fprintf( f, "\n" );
@@ -598,6 +691,7 @@ void FontGen::SaveFontdef()
 	FILE *f = fopen(fileName, "wt");
 	if (!f) Error("ERROR: Could not write %s\n", fileName);
 
+	PrintArgs(f);
 	fprintf(f,
 		"// Generated from %s %d\n\n"
 		"bitmap \"%s\"\n"
@@ -637,26 +731,53 @@ void FontGen::SaveCpp()
 	FILE *f = fopen(fileName, "wt");
 	if (!f) Error("ERROR: Could not write %s\n", fileName);
 
+	fprintf(f, "// Font file generated from %s %d\n", fontWinName, fontSize);
+	PrintArgs(f);
+	fprintf(f, "\n");
+
+	if (useNamespace)
+		fprintf(f, "namespace %s\n{\n\n", font_def.name);
+
 	fprintf(f,
-		"// Generated from %s %d\n\n"
-		"#define CHAR_WIDTH        %d\n"
-		"#define CHAR_HEIGHT       %d\n"
-		"#define FONT_FIRST_CHAR   %d\n"
-		"#define TEX_WIDTH         %d\n"
-		"#define TEX_HEIGHT        %d\n"
-		"\n"
-		"byte TEX_DATA[] = {",
-		fontWinName, fontSize,
+		"const int CHAR_WIDTH      =  %d;\n"
+		"const int CHAR_HEIGHT     =  %d;\n"
+		"const int FONT_FIRST_CHAR =  %d;\n"
+		"const int TEX_WIDTH       =  %d;\n"
+		"const int TEX_HEIGHT      =  %d;\n"
+		"\n",
 		font_def.charWidth,
 		font_def.charHeight,
 		firstChar,
-		TEX_WIDTH,
+		texture_width,
 		texture_height
-	);
+		);
+
+	if (variadic)
+	{
+		bool useByte = (texture_width <= 256 && texture_height <= 256);
+		fprintf(f,
+			"// Character locations: (x, y, width) x NumChars\n"
+			"const unsigned %s CHAR_LOCATIONS[] = {", useByte ? "char" : "short");
+		int numPerLine = 1000;
+		for (int i = firstChar; i <= lastChar; i++)
+		{
+			if (numPerLine > 10)
+			{
+				fprintf(f, "\n\t");
+				numPerLine = 0;
+			}
+			const letterloc_t& loc = font_def.locations[i - firstChar];
+			fprintf(f, "%d,%d,%d, ", loc.pos[0], loc.pos[1], loc.size[0]);
+			numPerLine++;
+		}
+		fprintf(f, "\n};\n\n");
+	}
+
+	fprintf(f, "const unsigned char TEX_DATA[] = {");
 
 	int start_line = TEX_HEIGHT - texture_height;
-	byte *src  = bmbits + TEX_WIDTH * 3 * start_line;
-	int width  = TEX_WIDTH;
+	byte *src  = bmbits + texture_width * 3 * start_line;
+	int width  = texture_width;
 	int height = texture_height;
 
 	// flip texture vertically
@@ -682,19 +803,20 @@ void FontGen::SaveCpp()
 		mono[i] = (b + g + r) / 3;				// B/W color
 	}
 
-#if CPP_4BPP
-	// make font 4 bits per pixel
-	src = mono;
-	byte *dst = src;
-	for (i = 0; i < size/2; i++)
+	if (packedCpp)
 	{
-		byte c1 = *src++;
-		byte c2 = *src++;
-		// 0->0, 255->15, 255/15 = 17
-		*dst++ = (c1 / 17 << 4) | (c2 / 17);
+		// make font 4 bits per pixel
+		src = mono;
+		byte *dst = src;
+		for (i = 0; i < size/2; i++)
+		{
+			byte c1 = *src++;
+			byte c2 = *src++;
+			// 0->0, 255->15, 255/15 = 17
+			*dst++ = (c1 / 17 << 4) | (c2 / 17);
+		}
+		size /= 2;
 	}
-	size /= 2;
-#endif
 
 	// dump
 	src = mono;
@@ -702,6 +824,12 @@ void FontGen::SaveCpp()
 	while (src < end)
 	{
 		byte c = *src++;
+
+		if (!packedCpp)
+		{
+			output(f, c);
+			continue;
+		}
 
 		// try RLE for zero bytes
 		if (c == 0 && src + 1 < end && *src == 0)
@@ -746,6 +874,9 @@ void FontGen::SaveCpp()
 
 	fprintf(f, "\n};\n\n");
 
+	if (useNamespace)
+		fprintf(f, "} // namespace\n");
+
 	delete[] mono;
 
 	fclose(f);
@@ -754,7 +885,7 @@ void FontGen::SaveCpp()
 
 void FontGen::Go()
 {
-	// Starts genereting the font stuff
+	// Starts generating the font stuff
 	PrepareFont();
 	PrepareBitmap();
 	PrepareHeader();
@@ -770,31 +901,15 @@ void FontGen::Go()
 	}
 }
 
-void main(int argc, char **argv)
+void main(int argc, const char **argv)
 {
 	if (argc == 1)
 	{
-		printf(
-			"Usage: fontgen -name <name> -winname \"<name>\" [options]\n"
-			"  Required:\n"
-			"    -name <name>      - The font name that the game will use\n"
-			"    -winname \"<name>\" - The Windows name of the font (in quotes)\n"
-			"  Optional:\n"
-			"    -size <number>    - The size of the font in pixels (default 16)\n"
-			"    -first <number>   - First character number to use. (default 32 (spacebar) )\n"
-			"    -last <number>    - Last character number to use (default 126)\n"
-			"    -styles <string>  - Styles to apply. <string> is comma separated list of:\n"
-			"                        bold, underline, strikeout, italic\n"
-			"                        Example: For a bold underlined string, use\n"
-			"                        \"-styles bold,underline\" (No spaces between commas)\n"
-			"    -tga <type>       - TGA output format, comma separated list of:\n"
-			"                        8 (8-bit texture), 24, 32, packed\n"
-			"    -cpp              - write as C header file instead of binaries\n"
-		);
+		FontGen::Usage();
 		return;
 	}
 
 	FontGen font(argc, argv);
 	font.Go();
-	printf( "Success!\n" );
+	printf("Success!\n");
 }
